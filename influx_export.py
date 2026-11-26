@@ -4,6 +4,7 @@
  SPDX-License-Identifier: Apache-2.0
 """
 
+from datetime import datetime
 import os
 
 import pandas as pd
@@ -63,8 +64,15 @@ def main(args: Dict[str, str]):
     bucket = args.pop("bucket")
     url = args.pop("vm_addr")
 
-    start = args.get('start-time', '0')
-    stop = args.get('stop-time', 'now()')
+    if args['start_time'] is not None:
+        start = int(datetime.fromisoformat(args['start_time']).timestamp())
+    else:
+        start = '0'
+
+    if args['stop_time'] is not None:
+        stop = int(datetime.fromisoformat(args['stop_time']).timestamp())
+    else:
+        stop = 'now()'
 
     for k, v in args.items():
         if v is not None:
@@ -77,32 +85,41 @@ def main(args: Dict[str, str]):
 
     # Get all unique series by reading first entry of every table.
     # With latest InfluxDB we could possibly use "schema.measurements()" but this doesn't exist in 2.0
-    first_in_series = f"""
-    from(bucket: "{bucket}")
-    |> range(start: {start}, stop: {stop})
-    |> first()"""
-    timeseries: List[pd.DataFrame] = query_api.query_data_frame(first_in_series)
-
-    # get all unique measurement-field pairs and then fetch and export them one-by-one.
-    # With really large databases the results should be possibly split further
-    # Something like query_data_frame_stream() might be then useful.
-    measurements_and_fields = [
-        gr[0] for df in timeseries for gr in df.groupby(["_measurement", "_field"])
-    ]
-    print(f"Found {len(measurements_and_fields)} unique time series")
-    for meas, field in measurements_and_fields:
-        print(f"Exporting {meas}_{field}")
-        whole_series = f"""
-        from(bucket: "{bucket}")
-        |> range(start: {start}, stop: {stop})
-        |> filter(fn: (r) => r["_measurement"] == "{meas}")
-        |> filter(fn: (r) => r["_field"] == "{field}")
+    #first_in_series = f"""
+    #from(bucket: "{bucket}")
+    #|> range(start: {start}, stop: {stop})
+    #|> first()
+    #"""
+    measurement_query = f"""
+    import "influxdata/influxdb/schema"
+    schema.measurements(bucket: "{bucket}")
+    """
+    print(measurement_query)
+    measurements: List[pd.DataFrame] = query_api.query_data_frame(measurement_query)["_value"]
+    print(f"Found {len(measurements)} different measurements")
+    for measurement in measurements:
+        field_query = f"""
+        import "influxdata/influxdb/schema"
+        schema.measurementFieldKeys(bucket: "{bucket}", measurement: "{measurement}", start: {start})
         """
-        df = query_api.query_data_frame(whole_series)
+        fields: List[pd.DataFrame] = query_api.query_data_frame(field_query)["_value"]
+        for field in fields:
+            # get all unique measurement-field pairs and then fetch and export them one-by-one.
+            # With really large databases the results should be possibly split further
+            # Something like query_data_frame_stream() might be then useful.
+            print(f"Exporting {measurement}_{field}")
+            whole_series = f"""
+            from(bucket: "{bucket}")
+            |> range(start: {start}, stop: {stop})
+            |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+            |> filter(fn: (r) => r["_field"] == "{field}")
+            """
+            print(whole_series)
+            df = query_api.query_data_frame(whole_series)
 
-        line = get_influxdb_lines(df)
-        # "db" is added as an extra tag for the value.
-        requests.post(f"{url}/write?db={bucket}", data=line)
+            line = get_influxdb_lines(df)
+            # "db" is added as an extra tag for the value.
+            requests.post(f"{url}/write?db={bucket}", data=line)
 
 
 if __name__ == "__main__":
