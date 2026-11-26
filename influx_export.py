@@ -63,6 +63,9 @@ def main(args: Dict[str, str]):
     bucket = args.pop("bucket")
     url = args.pop("vm_addr")
 
+    start = args.get('start-time', '0')
+    stop = args.get('stop-time', 'now()')
+
     for k, v in args.items():
         if v is not None:
             os.environ[k] = v
@@ -76,7 +79,7 @@ def main(args: Dict[str, str]):
     # With latest InfluxDB we could possibly use "schema.measurements()" but this doesn't exist in 2.0
     first_in_series = f"""
     from(bucket: "{bucket}")
-    |> range(start: 0, stop: now())
+    |> range(start: {start}, stop: {stop})
     |> first()"""
     timeseries: List[pd.DataFrame] = query_api.query_data_frame(first_in_series)
 
@@ -91,7 +94,7 @@ def main(args: Dict[str, str]):
         print(f"Exporting {meas}_{field}")
         whole_series = f"""
         from(bucket: "{bucket}")
-        |> range(start: 0, stop: now())
+        |> range(start: {start}, stop: {stop})
         |> filter(fn: (r) => r["_measurement"] == "{meas}")
         |> filter(fn: (r) => r["_field"] == "{field}")
         """
@@ -159,5 +162,17 @@ if __name__ == "__main__":
         "-a",
         type=str,
         help="VictoriaMetrics server",
+    )
+
+    parser.add_argument(
+        "--stop-time",
+        type=str,
+        help="the stop time of data to extract in ISO format, e.g., '2024-12-15T00:00:00"
+    )
+
+    parser.add_argument(
+        "--start-time",
+        type=str,
+        help="the start time of data to extract in ISO format, e.g., '2024-12-14T20:00:00"
     )
     main(vars(parser.parse_args()))
