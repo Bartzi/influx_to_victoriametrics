@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.flux_csv_parser import FluxQueryException
+from influxdb_client.rest import ApiException
 from influxdb_client.client.warnings import MissingPivotFunction
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -227,7 +228,7 @@ def query_single_measurement_with_split(
             return [df for df in res if not df.empty]
         return [res] if not res.empty else []
 
-    except FluxQueryException as exc:
+    except (FluxQueryException, ApiException) as exc:
         duration = win_end - win_start
         if duration <= min_step:
             print(
