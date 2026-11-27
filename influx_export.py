@@ -6,13 +6,16 @@
 
 from datetime import datetime
 import os
+import warnings
 
 import pandas as pd
 import requests
 
 from typing import Iterable, Dict, List
 from influxdb_client import InfluxDBClient
+from influxdb_client.client.warnings import MissingPivotFunction
 
+warnings.simplefilter("ignore", MissingPivotFunction)
 
 try:
     from dotenv import load_dotenv
@@ -63,14 +66,15 @@ def main(args: Dict[str, str]):
     print("args: " + str(args.keys()))
     bucket = args.pop("bucket")
     url = args.pop("vm_addr")
+    batch_size = args.pop("batch_size")
 
     if args['start_time'] is not None:
-        start = int(datetime.fromisoformat(args['start_time']).timestamp())
+        start = int(datetime.fromisoformat(args.pop('start_time')).timestamp())
     else:
         start = '0'
 
     if args['stop_time'] is not None:
-        stop = int(datetime.fromisoformat(args['stop_time']).timestamp())
+        stop = int(datetime.fromisoformat(args.pop('stop_time')).timestamp())
     else:
         stop = 'now()'
 
@@ -117,9 +121,15 @@ def main(args: Dict[str, str]):
             print(whole_series)
             df = query_api.query_data_frame(whole_series)
 
-            line = get_influxdb_lines(df)
+            lines = get_influxdb_lines(df)
             # "db" is added as an extra tag for the value.
-            requests.post(f"{url}/write?db={bucket}", data=line)
+            for i in range(0, len(lines), batch_size):
+                response = requests.post(f"{url}/write?db={bucket}", data=lines[i:i+batch_size])
+                if response.status_code in [200, 204]:
+                    continue
+                print("Error while writing to Victoria Metrics")
+                print(response.text)
+                return
 
 
 if __name__ == "__main__":
@@ -191,5 +201,11 @@ if __name__ == "__main__":
         "--start-time",
         type=str,
         help="the start time of data to extract in ISO format, e.g., '2024-12-14T20:00:00"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000
+        help="the maximum number of lines to send to victoria metrics at once"
     )
     main(vars(parser.parse_args()))
