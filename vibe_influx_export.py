@@ -8,10 +8,11 @@ from typing import Iterator
 import pandas as pd
 import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.flux_csv_parser import FluxQueryException
+from influxdb_client.client.warnings import MissingPivotFunction
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from influxdb_client.client.warnings import MissingPivotFunction
 
 warnings.simplefilter("ignore", MissingPivotFunction)
 
@@ -180,6 +181,41 @@ def write_batch_to_vm(
         return False
 
 
+def query_window_with_fallback(
+    query_api,
+    bucket: str,
+    win_start: datetime,
+    win_end: datetime,
+    min_step: timedelta = timedelta(minutes=15),
+) -> list[pd.DataFrame]:
+    """Query a time window; if InfluxDB panics, recursively split into smaller slices."""
+    start_iso = win_start.isoformat()
+    stop_iso = win_end.isoformat()
+    flux_query = f'''
+        from(bucket: "{bucket}")
+          |> range(start: {start_iso}, stop: {stop_iso})
+    '''
+    try:
+        res = query_api.query_data_frame(flux_query)
+        if isinstance(res, list):
+            return [df for df in res if not df.empty]
+        return [res] if not res.empty else []
+
+    except FluxQueryException as exc:
+        duration = win_end - win_start
+        if duration <= min_step:
+            print(f"  [SKIPPED CORRUPT SLICE] {start_iso} -> {stop_iso} | InfluxDB panic: {exc}")
+            return []
+
+        # Split failing window into smaller sub-windows (e.g. 24h -> 1h -> 15m)
+        sub_step = timedelta(hours=1) if duration > timedelta(hours=1) else min_step
+        print(f"  [InfluxDB Panic] Splitting {start_iso} -> {stop_iso} into {sub_step} slices...")
+        dfs: list[pd.DataFrame] = []
+        for sub_start, sub_end in iter_time_windows(win_start, win_end, sub_step):
+            dfs.extend(query_window_with_fallback(query_api, bucket, sub_start, sub_end, min_step))
+        return dfs
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export InfluxDB v2 data to VictoriaMetrics.")
     parser.add_argument("-o", "--org", required=True, help="InfluxDB organization")
@@ -224,18 +260,13 @@ def main():
             stop_iso = win_end.isoformat()
             print(f"Querying window {start_iso} -> {stop_iso} ...")
 
-            flux_query = f'''
-                from(bucket: "{args.bucket}")
-                  |> range(start: {start_iso}, stop: {stop_iso})
-            '''
-
-            result = query_api.query_data_frame(flux_query)
+            result = query_window_with_fallback(query_api, args.bucket, win_start, win_end)
 
             # InfluxDB returns either a single DataFrame or a list of DataFrames
+            if not result:
+                print("  No data in window.")
+                continue
             if isinstance(result, list):
-                if not result:
-                    print("  No data in window.")
-                    continue
                 df = pd.concat(result, ignore_index=True)
             else:
                 df = result
