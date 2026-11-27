@@ -268,7 +268,30 @@ def query_window_with_fallback(
     try:
         res = query_api.query_data_frame(flux_query)
         if isinstance(res, list):
-            
+            return [df for df in res if not df.empty]
+        return [res] if not res.empty else []
+
+    except FluxQueryException as exc:
+        print(f"  [InfluxDB Panic on Full Bucket] {exc}")
+        print(f"  Falling back to per-measurement export for {start_iso} -> {stop_iso}...")
+
+        try:
+            measurements = list_measurements_in_window(query_api, bucket, start_iso, stop_iso)
+        except FluxQueryException:
+            # Fallback if schema.measurements itself panics on that time range
+            measurements = list_measurements_in_window(
+                query_api, bucket, "1970-01-01T00:00:00Z", "now()"
+            )
+
+        print(f"  Found {len(measurements)} measurements to query individually.")
+        dfs: list[pd.DataFrame] = []
+        for meas in measurements:
+            dfs.extend(
+                query_single_measurement_with_split(
+                    query_api, bucket, meas, win_start, win_end, min_step
+                )
+            )
+        return dfs
 
 
 def main():
